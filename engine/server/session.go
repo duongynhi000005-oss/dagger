@@ -66,6 +66,7 @@ import (
 
 type daggerSession struct {
 	sessionID          string
+	createdAt          time.Time
 	archiveMu          sync.Mutex
 	archiveManifest    *archive.Manifest
 	archiveExpected    agentcontrol.Expectation
@@ -1348,6 +1349,7 @@ func (srv *Server) getOrCreateSessionLocked(sessionID, clientID string) (*dagger
 	}
 	sess := &daggerSession{
 		sessionID:          sessionID,
+		createdAt:          time.Now(),
 		mainClientCallerID: clientID,
 		clientRecords:      map[string]*clientRecord{},
 		clientRuntimes:     map[string]*clientRuntime{},

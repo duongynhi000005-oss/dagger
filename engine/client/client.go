@@ -182,6 +182,10 @@ type Params struct {
 
 	// Profile enables engine wall-clock profiling (wcprof) for this session.
 	Profile bool
+
+	// DetachedSession makes a session this client creates outlive it; see
+	// engine.ClientMetadata.DetachedSession.
+	DetachedSession bool
 }
 
 type Client struct {
@@ -1925,6 +1929,7 @@ func (c *Client) clientMetadata() engine.ClientMetadata {
 		EnableCloudScaleOut:            c.EnableCloudScaleOut,
 		CloudScaleOutEngineID:          remoteEngineID,
 		Profile:                        c.Profile,
+		DetachedSession:                c.DetachedSession,
 	}
 	if c.primarySpan.IsValid() {
 		md.PrimaryTraceID = c.primarySpan.TraceID().String()

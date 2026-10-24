@@ -2661,6 +2661,9 @@ func (srv *Server) serveQuery(w http.ResponseWriter, r *http.Request, client *cl
 	// telemetry volume would otherwise grow quadratically): mark the context
 	// so core.AroundFunc emits nothing for the whole selection.
 	ctx, telemetrySuppressed := withRequestTelemetrySuppression(ctx, r)
+	// The caller's span (e.g. a client-reported task making this request),
+	// before this request's own span below replaces it in ctx.
+	callerSpan := trace.SpanContextFromContext(ctx)
 
 	// turn panics into graphql errors — must be set up before any code that
 	// could panic (including ensureExtraModulesLoaded and schema loading).
@@ -2751,6 +2754,11 @@ func (srv *Server) serveQuery(w http.ResponseWriter, r *http.Request, client *cl
 		ctx, profServeOp = wcprof.BeginOp(ctx, wcprof.OpKindSessionPhase, "session.serveQuery", wcprof.OpOpts{
 			ClientID: client.clientID,
 		})
+		if callerSpan.IsValid() {
+			// Resolves, in the dump, to the caller's op when the caller
+			// reported itself (see engine/wcprof/contract).
+			wcprof.LinkOTelParent(ctx, profServeOp.ID(), callerSpan.TraceID().String(), callerSpan.SpanID().String())
+		}
 		defer func() {
 			profServeOp.EndErr(rerr)
 		}()

@@ -73,6 +73,19 @@ const (
 	OpKindIO
 	// OpKindInternal is engine-internal background work (gc, persistence).
 	OpKindInternal
+	// OpKindTask is one unit of a client's own work, reported by the client
+	// (e.g. one package of a Go build); see the reporting contract in
+	// engine/wcprof/contract.
+	OpKindTask
+	// OpKindTaskGroup is a reported parent whose child tasks run concurrently,
+	// ordered only by their dependency waits and resource acquisitions.
+	OpKindTaskGroup
+	// OpKindResource is a reported limited resource instance (capacity and
+	// admission policy), for the life of the instance.
+	OpKindResource
+	// OpKindAcquire is a reported acquisition of one unit of a resource, from
+	// the request to the release.
+	OpKindAcquire
 )
 
 var opKindNames = map[OpKind]string{
@@ -85,6 +98,10 @@ var opKindNames = map[OpKind]string{
 	OpKindSessionPhase: "session_phase",
 	OpKindIO:           "io",
 	OpKindInternal:     "internal",
+	OpKindTask:         "task",
+	OpKindTaskGroup:    "task_group",
+	OpKindResource:     "resource",
+	OpKindAcquire:      "acquire",
 }
 
 func (k OpKind) String() string {
@@ -185,6 +202,9 @@ const (
 	WaitReasonExec
 	// WaitReasonIO: blocked on external I/O.
 	WaitReasonIO
+	// WaitReasonDependency: a reported task waited for one of its
+	// dependencies' results (zero-length when it was already done).
+	WaitReasonDependency
 )
 
 var waitReasonNames = map[WaitReason]string{
@@ -195,6 +215,7 @@ var waitReasonNames = map[WaitReason]string{
 	WaitReasonLock:         "lock",
 	WaitReasonExec:         "exec",
 	WaitReasonIO:           "io",
+	WaitReasonDependency:   "dependency",
 }
 
 func (r WaitReason) String() string {

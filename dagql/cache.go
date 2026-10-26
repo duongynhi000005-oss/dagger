@@ -5811,6 +5811,11 @@ func (c *Cache) getOrInitCall(
 	ctx, profOp := wcprof.BeginOp(ctx, wcprof.OpKindCall, profCallClass(req.ResultCall), wcprof.OpOpts{
 		ClientID: profClientID(ctx),
 	})
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		// Clients the call runs (its exec's process, the module it calls)
+		// parent what they report to wcprof under the call's span.
+		wcprof.MapOTelSpan(ctx, profOp.ID(), sc.TraceID().String(), sc.SpanID().String())
+	}
 	res, err := c.getOrInitCallTakingOver(ctx, sessionID, resolver, req, fn, profOp)
 	outcome := profOp.OutcomeHint()
 	switch {

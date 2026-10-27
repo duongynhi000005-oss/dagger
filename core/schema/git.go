@@ -698,14 +698,14 @@ func (s *gitSchema) git(ctx context.Context, parent dagql.ObjectResult[*core.Que
 				View:  curCall.View,
 			})
 			if err != nil {
-				if errors.Is(err, gitutil.ErrGitAuthFailed) {
+				if shouldTryNextGitCandidate(ctx, err) {
 					accessErrors = append(accessErrors, err)
 					continue
 				}
 				return inst, err
 			}
 			if _, err := repo.Self().LoadRemote(ctx); err != nil {
-				if errors.Is(err, gitutil.ErrGitAuthFailed) {
+				if shouldTryNextGitCandidate(ctx, err) {
 					accessErrors = append(accessErrors, err)
 					continue
 				}
@@ -1484,6 +1484,13 @@ func gitLockInputs(repo *core.GitRepository, name string) ([]any, error) {
 	return []any{remoteRepo.URL.Remote(), name}, nil
 }
 
+func shouldTryNextGitCandidate(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
 func gitRemoteHasWorkspacePin(ctx context.Context, remote string) bool {
 	remote = workspace.NormalizeGitRemote(remote)
 	if remote == "" {
@@ -1494,7 +1501,7 @@ func gitRemoteHasWorkspacePin(ctx context.Context, remote string) bool {
 		return false
 	}
 	lookupLock, err := lookupLockForAPI(ctx, query, workspace.LockOperationGitLatest)
-	if err != nil || lookupLock == nil {
+	if err != nil || lookupLock == nil || lookupLock.refresh {
 		return false
 	}
 	entries := lookupLock.lock.Entries()

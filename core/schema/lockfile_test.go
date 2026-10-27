@@ -2,6 +2,7 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/dagql/call"
 	"github.com/dagger/dagger/engine"
+	"github.com/dagger/dagger/util/gitutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -217,4 +219,49 @@ func TestNoLockLookupCacheInputs(t *testing.T) {
 			require.NotEqual(t, first, second, "each noLock lookup gets a fresh key")
 		})
 	}
+}
+
+func TestShouldTryNextGitCandidate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("retries on auth failure", func(t *testing.T) {
+		t.Parallel()
+		require.True(t, shouldTryNextGitCandidate(context.Background(), gitutil.ErrGitAuthFailed))
+	})
+
+	t.Run("retries on transport failure such as HTTPS probe against non-standard SSH port", func(t *testing.T) {
+		t.Parallel()
+		transportErr := errors.New("Get \"https://repo.example.com:2222/dagger/module/info/refs?service=git-upload-pack\": http: server gave HTTP response to HTTPS client")
+		require.True(t, shouldTryNextGitCandidate(context.Background(), transportErr))
+	})
+
+	t.Run("does not retry when context is canceled", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		require.False(t, shouldTryNextGitCandidate(ctx, errors.New("transport failed")))
+		require.False(t, shouldTryNextGitCandidate(context.Background(), context.Canceled))
+		require.False(t, shouldTryNextGitCandidate(context.Background(), context.DeadlineExceeded))
+	})
+}
+
+func TestGitRemoteHasWorkspacePinIgnoresRefresh(t *testing.T) {
+	t.Parallel()
+
+	lock := workspace.NewLock()
+	require.NoError(t, lock.SetLookup(
+		workspace.CoreLockNamespace,
+		workspace.LockOperationGitLatest,
+		[]any{"ssh://git@repo.example.com:2222/dagger/module"},
+		"refs/tags/v1.0.0",
+	))
+
+	server := &currentTypeDefsTestServer{
+		workspaceLock:   lock,
+		workspaceLockOK: true,
+	}
+	ctx := core.ContextWithQuery(withCurrentLockView(context.Background()), &core.Query{Server: server})
+
+	require.True(t, gitRemoteHasWorkspacePin(ctx, "https://repo.example.com:2222/dagger/module"))
+	require.False(t, gitRemoteHasWorkspacePin(withWorkspaceLookupLockRefresh(ctx), "https://repo.example.com:2222/dagger/module"))
 }

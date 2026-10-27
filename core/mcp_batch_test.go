@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dagger/dagger/dagql"
@@ -621,4 +622,79 @@ func TestAnnotateMCPSyncFailure(t *testing.T) {
 			require.Contains(t, results[call].Text, "mount failed")
 		}
 	})
+}
+
+func TestMCPSessionsReusedAcrossClones(t *testing.T) {
+	ctx := t.Context()
+
+	newInMemoryDialer := func(prefix string, dials *int) func(context.Context) (*mcp.ClientSession, error) {
+		return func(ctx context.Context) (*mcp.ClientSession, error) {
+			*dials++
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+			srv := mcp.NewServer(&mcp.Implementation{Name: "probe", Version: "1.0.0"}, nil)
+			type echoArgs struct {
+				Text string `json:"text"`
+			}
+			mcp.AddTool(srv, &mcp.Tool{
+				Name:        "echo",
+				Description: "Echo input text",
+			}, func(_ context.Context, _ *mcp.CallToolRequest, args echoArgs) (*mcp.CallToolResult, any, error) {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: prefix + args.Text}},
+				}, nil, nil
+			})
+			srvSess, err := srv.Connect(ctx, serverTransport, nil)
+			if err != nil {
+				return nil, err
+			}
+			t.Cleanup(func() { _ = srvSess.Close() })
+			clientSess, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil).Connect(ctx, clientTransport, nil)
+			if err != nil {
+				return nil, err
+			}
+			t.Cleanup(func() { _ = clientSess.Close() })
+			return clientSess, nil
+		}
+	}
+
+	var dials int
+	base := newMCP().WithMCPServer(&MCPServerConfig{
+		Name: "probe",
+		dial: newInMemoryDialer("v1:", &dials),
+	})
+
+	// Step 1 clones base, dials the MCP server on the transient clone, and runs a tool call.
+	step1 := base.Clone()
+	tools1 := NewLLMToolSet()
+	require.NoError(t, step1.loadMCPTools(ctx, tools1))
+	require.Equal(t, 1, dials)
+	require.Len(t, tools1.Order, 1)
+	require.Equal(t, "echo", tools1.Order[0].Name)
+
+	// Step 2 is materialized from base (not from step1's transient clone) and must
+	// reuse the live session dialed in step 1 instead of dialing again.
+	step2 := base.Clone()
+	tools2 := NewLLMToolSet()
+	require.NoError(t, step2.loadMCPTools(ctx, tools2))
+	require.Equal(t, 1, dials, "second step must reuse the session opened in step 1")
+	require.Len(t, tools2.Order, 1)
+
+	res, err := tools2.Order[0].Call(ctx, map[string]any{"text": "hi"})
+	require.NoError(t, err)
+	callRes, ok := res.(*mcp.CallToolResult)
+	require.True(t, ok)
+	require.Len(t, callRes.Content, 1)
+	require.Equal(t, "v1:hi", callRes.Content[0].(*mcp.TextContent).Text)
+
+	// Re-registering the server name on a branch dials the replacement without
+	// disturbing the original conversation's session.
+	var replacementDials int
+	replaced := base.WithMCPServer(&MCPServerConfig{
+		Name: "probe",
+		dial: newInMemoryDialer("v2:", &replacementDials),
+	})
+	replacedTools := NewLLMToolSet()
+	require.NoError(t, replaced.Clone().loadMCPTools(ctx, replacedTools))
+	require.Equal(t, 1, replacementDials)
+	require.Equal(t, 1, dials)
 }

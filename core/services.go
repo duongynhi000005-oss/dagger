@@ -1253,6 +1253,11 @@ func (ss *Services) startWithKey(
 				_ = running.Wait(ctx)
 			}
 		case isRunning:
+			if opts.IO != nil && (opts.IO.Stdin != nil || opts.IO.Stdout != nil || opts.IO.Stderr != nil) {
+				ss.l.Unlock()
+				releaseSuppression()
+				return nil, nil, fmt.Errorf("service %s is already running; cannot attach new stdio", network.HostHash(key.Digest))
+			}
 			ss.bindings[key]++
 			suppress(running)
 			ss.l.Unlock()

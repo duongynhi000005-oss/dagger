@@ -41,6 +41,10 @@ func (t *ServiceMCPTransport) Connect(ctx context.Context) (mcp.Connection, erro
 		},
 	)
 	if err != nil {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		return nil, fmt.Errorf("failed to start service: %w", err)
 	}
 

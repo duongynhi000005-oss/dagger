@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"context"
+	"io"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -568,4 +569,39 @@ func TestServicesDetachRace(t *testing.T) {
 	retrieved, err := services.Get(ctxB, stub.Digest(), false)
 	require.NoError(t, err)
 	require.Equal(t, runningB, retrieved)
+}
+
+func TestServicesStartWithIOAlreadyRunningFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := engine.ContextWithClientMetadata(context.Background(), &engine.ClientMetadata{
+		SessionID: "stdio-session",
+		ClientID:  "stdio-client",
+	})
+
+	services := core.NewServices()
+	stub := newStartable("stdio-mcp")
+	stub.Succeed()
+
+	r1, w1 := io.Pipe()
+	defer r1.Close()
+	defer w1.Close()
+
+	running, err := services.StartWithIO(ctx, stub.Digest(), stub, true, &core.ServiceIO{
+		Stdin:  r1,
+		Stdout: w1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, running)
+
+	r2, w2 := io.Pipe()
+	defer r2.Close()
+	defer w2.Close()
+
+	_, err = services.StartWithIO(ctx, stub.Digest(), stub, true, &core.ServiceIO{
+		Stdin:  r2,
+		Stdout: w2,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "already running; cannot attach new stdio")
 }

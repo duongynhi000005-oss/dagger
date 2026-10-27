@@ -143,8 +143,10 @@ type MCP struct {
 	ownerAgent string
 	// Configured MCP servers.
 	mcpServers map[string]*MCPServerConfig
-	// Persistent MCP sessions.
-	mcpSessions map[string]*mcp.ClientSession
+	// Persistent MCP sessions, shared across Clone so sessions dialed on a
+	// step's transient MCP clone survive onto subsequent steps.
+	mcpSessions   map[string]*mcp.ClientSession
+	mcpSessionsMu *sync.Mutex
 	// Synchronize any concurrent tool call results.
 	mu *sync.Mutex
 }
@@ -156,11 +158,17 @@ type MCPServerConfig struct {
 
 	// Command to run the MCP server
 	Service dagql.ObjectResult[*Service]
+
+	// Optional dial override for unit tests.
+	dial func(context.Context) (*mcp.ClientSession, error)
 }
 
 func (srv *MCPServerConfig) Dial(ctx context.Context) (_ *mcp.ClientSession, rerr error) {
 	ctx, span := Tracer(ctx).Start(ctx, "start mcp server: "+srv.Name, telemetry.Reveal())
 	defer telemetry.EndWithCause(span, &rerr)
+	if srv.dial != nil {
+		return srv.dial(ctx)
+	}
 	return mcp.NewClient(&mcp.Implementation{
 		Title:   "Dagger",
 		Version: engine.Version,
@@ -171,9 +179,10 @@ func (srv *MCPServerConfig) Dial(ctx context.Context) (_ *mcp.ClientSession, rer
 
 func newMCP() *MCP {
 	return &MCP{
-		mcpServers:  make(map[string]*MCPServerConfig),
-		mcpSessions: map[string]*mcp.ClientSession{},
-		mu:          &sync.Mutex{},
+		mcpServers:    make(map[string]*MCPServerConfig),
+		mcpSessions:   map[string]*mcp.ClientSession{},
+		mcpSessionsMu: &sync.Mutex{},
+		mu:            &sync.Mutex{},
 	}
 }
 
@@ -190,7 +199,12 @@ func (m *MCP) Clone() *MCP {
 	cp.boundTools = slices.Clone(cp.boundTools)
 	cp.skillDirs = slices.Clone(cp.skillDirs)
 	cp.mcpServers = maps.Clone(cp.mcpServers)
-	cp.mcpSessions = maps.Clone(cp.mcpSessions)
+	if cp.mcpSessions == nil {
+		cp.mcpSessions = map[string]*mcp.ClientSession{}
+	}
+	if cp.mcpSessionsMu == nil {
+		cp.mcpSessionsMu = &sync.Mutex{}
+	}
 	cp.returned = false
 	// Per-step scratch state: the dispatching conversation and any continuation
 	// a tool returned belong to the step that set them, not to the clone.
@@ -323,8 +337,21 @@ func (m *MCP) baseServer(ctx context.Context) (*dagql.Server, error) {
 }
 
 func (m *MCP) WithMCPServer(srv *MCPServerConfig) *MCP {
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Lock()
+	}
+	prevSessions := maps.Clone(m.mcpSessions)
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Unlock()
+	}
 	m = m.Clone()
 	m.mcpServers[srv.Name] = srv
+	if prevSessions == nil {
+		prevSessions = map[string]*mcp.ClientSession{}
+	}
+	delete(prevSessions, srv.Name)
+	m.mcpSessions = prevSessions
+	m.mcpSessionsMu = &sync.Mutex{}
 	return m
 }
 
@@ -366,6 +393,10 @@ func (m *MCP) Tools(ctx context.Context) ([]LLMTool, error) {
 }
 
 func (m *MCP) syncMCPSessions(ctx context.Context) error {
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Lock()
+		defer m.mcpSessionsMu.Unlock()
+	}
 	stop := maps.Clone(m.mcpSessions)
 	for _, mcpSrv := range m.mcpServers {
 		delete(stop, mcpSrv.Name)
@@ -379,8 +410,10 @@ func (m *MCP) syncMCPSessions(ctx context.Context) error {
 		m.mcpSessions[mcpSrv.Name] = sess
 	}
 	for name, srv := range stop {
-		if err := srv.Close(); err != nil {
-			return err
+		if srv != nil {
+			if err := srv.Close(); err != nil {
+				return err
+			}
 		}
 		delete(m.mcpSessions, name)
 	}
@@ -391,10 +424,17 @@ func (m *MCP) loadMCPTools(ctx context.Context, allTools *LLMToolSet) error {
 	if err := m.syncMCPSessions(ctx); err != nil {
 		return err
 	}
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Lock()
+	}
+	sessions := maps.Clone(m.mcpSessions)
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Unlock()
+	}
 	// Serve servers in a fixed order: the tool list is part of every
 	// request's cached prefix, and a map walk would reshuffle it per call.
-	for _, serverName := range slices.Sorted(maps.Keys(m.mcpSessions)) {
-		sess := m.mcpSessions[serverName]
+	for _, serverName := range slices.Sorted(maps.Keys(sessions)) {
+		sess := sessions[serverName]
 		for tool, err := range sess.Tools(ctx, nil) {
 			if err != nil {
 				return err
@@ -2314,7 +2354,14 @@ func (m *MCP) mcpServerSyncsWorkspace(serverName string) bool {
 	if !ok {
 		return false
 	}
-	if _, ok := m.mcpSessions[serverName]; !ok {
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Lock()
+	}
+	_, hasSession := m.mcpSessions[serverName]
+	if m.mcpSessionsMu != nil {
+		m.mcpSessionsMu.Unlock()
+	}
+	if !hasSession {
 		return false
 	}
 	if mcpSrv.Service.Self() == nil {
